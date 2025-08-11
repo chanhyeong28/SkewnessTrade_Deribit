@@ -208,5 +208,7 @@ __marimo__/
 
 # Key 
 /key
+
+# DS_store
 .DS_Store
-.DS_Store
+
