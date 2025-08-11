@@ -119,7 +119,6 @@ class WebSocketClient:
                         if message['result'] is not None:
                             self.portfolio_status = message
 
-
                     elif message['id'] == 1006:
                         logging.info(f"Position: {message}")
                         if message['result'] is not None:
@@ -149,7 +148,7 @@ class WebSocketClient:
                                     print("🔹 Updated BTC Future Price For {0}: {1}".format(date,
                                                                                            self.latest_underlying_prices[
                                                                                                f"BTC-{date}"]))
-                            # Updating Options
+                            # Updating options for calculating spread
                             if bool(re.match(fr"^ticker\.BTC-{date}-(\d+)-([CP])\.100ms", channel)):
                                 option_data = message["params"]["data"]
                                 logging.debug(option_data)
@@ -192,7 +191,7 @@ class WebSocketClient:
 
                                 print("✅ Tick data inserted at {0} for {1}".format(datetime.now(),f"BTC-{date_str}"))
 
-                            # Updating Option
+                            # Updating options for generating IV curve
                             if channel == 'markprice.options.btc_usd':
                                 curve_data = message["params"]["data"]
 
@@ -204,7 +203,7 @@ class WebSocketClient:
 
                                     if not instrument_name or not timestamp or not mark_price or not mark_iv:
                                         continue
-
+                                    # Extract elements from instrument name
                                     strike_price, option_type, expiration_timestamp, date_str = self.extract_strike_price_type_expiration(
                                         instrument_name)
 
@@ -265,7 +264,6 @@ class WebSocketClient:
                 )
                 )
 
-
     async def heartbeat_response(self) -> None:
         """
         Sends the required WebSocket response to
@@ -303,7 +301,6 @@ class WebSocketClient:
         }
         await self.websocket_client.send(json.dumps(msg))
         logging.info(f"Request for auth: {msg}")
-
 
     async def ws_refresh_auth(self) -> None:
         """
@@ -517,7 +514,6 @@ class WebSocketClient:
         await self.websocket_client.send(json.dumps(msg))
         logging.info(f"📦 get_positions request sent (kind={kind})")
 
-
 class Strategy_RR(WebSocketClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -623,8 +619,7 @@ class Strategy_RR(WebSocketClient):
             await asyncio.sleep(600)
 
     async def compute_spd_skewness(self):
-        risk_free_rate = 0.043  # Example risk-free rate (4.3%)
-
+        # Regard ATM slope as skewness
         while True:
             await asyncio.sleep(60)
 
@@ -670,7 +665,6 @@ class Strategy_RR(WebSocketClient):
 
                 try:
                     # **Get Remaining Maturity (T-t) in Years**
-                    # current_time = datetime.now().timestamp()
                     remaining_maturity = (int(exp_ts) - (int(current_time)/1000)) / (
                                 365 * 24 * 60 * 60)  # Convert seconds to years
 
@@ -706,7 +700,7 @@ class Strategy_RR(WebSocketClient):
                     continue
 
     def fetch_data(self):
-        # Fetching data in past 12 hours
+        # Fetching data from the past 12 hours
         sql = """
                 SELECT timestamp, expiration_timestamp, option_type, bid_price, ask_price, bid_iv, ask_iv, log_moneyness, delta, theta
                 FROM btc_options_raw
@@ -777,6 +771,7 @@ class Strategy_RR(WebSocketClient):
                 # Merge far and near results on timestamp
                 final_df = pd.merge(merged_far, merged_near, on='timestamp')
 
+                # Calculate spread using bid/ask
                 if self.spread_way == "LONG":
                     final_df['far_spread'] = - final_df['ask_iv_far_call'] + final_df['bid_iv_far_put']
                     final_df['near_spread'] = - final_df['ask_iv_near_put'] + final_df['bid_iv_near_call']
@@ -813,6 +808,7 @@ class Strategy_RR(WebSocketClient):
                     print("⚠️ Simulation: Please wait until getting the strike prices")
                     continue
 
+                # Simulate the strategy to check margin
                 if self.spread_way == "SHORT":
                     await self.simulate_portfolio({
                                                    "BTC-{0}-{1}-C".format(
@@ -834,6 +830,7 @@ class Strategy_RR(WebSocketClient):
                                                    })
 
                     await asyncio.sleep(5)
+                    # Check margin status
                     if self.portfolio_status == None:
                         self.pre_margin_check_short = False
                     elif self.portfolio_status['result']['equity'] < self.portfolio_status['result'][
@@ -868,6 +865,7 @@ class Strategy_RR(WebSocketClient):
                     })
 
                     await asyncio.sleep(5)
+                    # Check margin status
                     if self.portfolio_status == None:
                         self.pre_margin_check_long = False
                     elif self.portfolio_status['result']['equity'] < self.portfolio_status['result'][
@@ -892,7 +890,10 @@ class Strategy_RR(WebSocketClient):
             await asyncio.sleep(60)
             try:
                 if self.enabled:
-                    # To trade 0.1 amounts of RR when spreads for both IV and price are positive
+                    # Execute a 0.1-unit Risk Reversal position conditional on positive spreads
+                    # in both implied volatility and underlying price.
+                    # Potential improvement: refine the signal detection methodology
+
                     if (self.latest_rr_spread > 0) & (self.latest_rr_spread_price > 0):
                         logging.info(f"pre_margin_check_long = {self.pre_margin_check_long}")
                         logging.info(f"pre_margin_check_short = {self.pre_margin_check_short}")
@@ -960,9 +961,7 @@ class Telegram_bot(Strategy_RR):
             "/trade <buy/sell> <amount> <instrument> [price] - Place an order\n"
             "/cancel <order_id> - Cancel an order\n"
             "/margin - Check margin & P&L\n"
-            "/positions - Check current positions\n"
             "/toggle_risk <on/off> - Enable/Disable Risk Reversal Trading\n"
-            "/set_expiration <DDMMMYY,DDMMMYY,...> - Update Expiration Dates\n"
         )
 
     # **2. Place an Order**
@@ -1009,16 +1008,19 @@ class Telegram_bot(Strategy_RR):
 
     # **4. Check Margin & P&L**
     async def margin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        margin_data = self.portfolio_status['result']
-        print(f"margin_data? : {margin_data}")
-        await update.message.reply_text(
-            f"📊 Portfolio Summary:\n"
-            f"🔹 projected Equity: {margin_data['equity']} BTC\n"
-            f"🔹 projected maintenance margin: {margin_data['projected_maintenance_margin']} BTC\n"
-            f"🔹 projected initial margin: {margin_data['projected_initial_margin']} BTC\n"
-            f"🔹 Available Margin: {margin_data['margin_balance']} BTC\n"
-            f"🔹 P&L: {margin_data['total_pl']} BTC"
-        )
+        try:
+            margin_data = self.portfolio_status['result']
+            print(f"margin_data? : {margin_data}")
+            await update.message.reply_text(
+                f"📊 Portfolio Summary:\n"
+                f"🔹 projected Equity: {margin_data['equity']} BTC\n"
+                f"🔹 projected maintenance margin: {margin_data['projected_maintenance_margin']} BTC\n"
+                f"🔹 projected initial margin: {margin_data['projected_initial_margin']} BTC\n"
+                f"🔹 Available Margin: {margin_data['margin_balance']} BTC\n"
+                f"🔹 P&L: {margin_data['total_pl']} BTC"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
     # **5. Toggle Risk Reversal Trading**
     async def toggle_risk_reversal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1030,7 +1032,6 @@ class Telegram_bot(Strategy_RR):
         self.enabled = enabled
         print(f"enabled? : {self.enabled}")
         await update.message.reply_text(f"⚙️ Risk Reversal is now {'ENABLED' if enabled else 'DISABLED'}.")
-
 
     async def initialize_telegram_bot(self):
         # build the application
@@ -1094,4 +1095,5 @@ if __name__ == "__main__":
     with open('key/bot_token.txt', 'r') as f:
         bot_token = f.readline().strip()
 
+    # Initialization
     test = Telegram_bot(ws_url, client_id, timestamp, encoded_signature, nonce, data, bot_token=bot_token)
