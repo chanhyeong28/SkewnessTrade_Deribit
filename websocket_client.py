@@ -15,234 +15,42 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import CubicSpline
 from telegram import Update
+import telegram
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 
 class WebSocketClient:
-    def __init__(self, ws_connection_url, client_id, timestamp, encoded_signature, nonce, data) -> None:
+    def __init__(self, ws_connection_url, client_id, private_key) -> None:
 
         # Instance Variables
         self.ws_connection_url: str = ws_connection_url
         self.client_id: str = client_id
-        self.timestamp = timestamp
-        self.encoded_signature = encoded_signature
-        self.nonce = nonce
-        self.data = data
+        self.private_key = private_key
+        self.timestamp = None
+        self.encoded_signature = None
+        self.nonce = None
+        self.data = None
         self.websocket_client: websockets.WebSocketClientProtocol = None
         self.access_token = None
         self.refresh_token = None
         self.refresh_token_expiry_time = None
-        self.latest_underlying_prices: dict = {}
-        self.otm_call: dict = {}
-        self.otm_put: dict = {}
-        self.perpetual_expirations_raw: list = []
-        self.selected_expirations_raw: list = []
-        self.selected_expirations = None
-        self.expirations_pair: dict = {}
-        self.selected_expirations_subscribe: list = []
-        self.portfolio_status = None
-        self.portfolio_position = None
-        # self.get_user_expiration_dates()
-        # self.generate_subscribe()
-        self.loop = asyncio.new_event_loop()
 
-    def start(self):
-        print("Hi")
-        self.loop.run_until_complete(self.ws_manager())
-
-    def extract_strike_price_type_expiration(self, instr_name):
-        match = re.search(r'-(\d{2}[A-Z]{3}\d{2})-(\d+)-([CP])', instr_name)
-        if match:
-            date_str = match.group(1)
-            strike_price = float(match.group(2))
-            option_type = "call" if match.group(3) == "C" else "put"
-
-            try:
-                expiration_date = datetime.strptime(date_str, "%d%b%y")
-                expiration_timestamp = int(expiration_date.timestamp())
-            except ValueError:
-                expiration_timestamp = None
-
-            return strike_price, option_type, expiration_timestamp, date_str
-
-        return None, None, None, None
-
-    def generate_subscribe(self):
-        for date in self.selected_expirations_raw:
-            self.selected_expirations_subscribe.append(f"ticker.BTC-{date}.100ms")
-            self.latest_underlying_prices[f"BTC-{date}"] = False
-        self.selected_expirations_subscribe.append("markprice.options.btc_usd")
-        self.selected_expirations_subscribe.append("ticker.BTC-PERPETUAL.100ms")
-
-    async def ws_manager(self) -> None:
-        async with (websockets.connect(self.ws_connection_url, ping_interval=None, compression=None,close_timeout=60)
-                    as self.websocket_client):
-
-            # Authenticate WebSocket Connection
-            await self.ws_auth()
-
-            # Establish Heartbeat
-            await self.establish_heartbeat()
-
-            self.loop.create_task(self.ws_refresh_auth())
-
-            await self.ws_subscribe(operation='subscribe', ws_channel=self.selected_expirations_subscribe)
-
-            while self.websocket_client.state == websockets.protocol.State.OPEN:
-                message: bytes = await self.websocket_client.recv()
-                message: Dict = json.loads(message)
-
-                if 'id' in list(message):
-                    if message['id'] == 9929:
-                        if self.refresh_token is None:
-                            logging.info('Successfully authenticated WebSocket Connection')
-                            logging.info(message)
-                        else:
-                            logging.info('Successfully refreshed the authentication of the WebSocket Connection')
-                        self.access_token = message['result']['access_token']
-                        self.refresh_token = message['result']['refresh_token']
-
-                        # Refresh Authentication well before the required datetime
-                        if message['testnet']:
-                            expires_in: int = 300
-                        else:
-                            expires_in: int = message['result']['expires_in'] - 240
-
-                        self.refresh_token_expiry_time = datetime.now() + timedelta(seconds=expires_in)
-
-                    elif message['id'] == 8212:
-                        # Avoid logging Heartbeat messages
-                        continue
-
-                    elif message['id'] == 1005:
-                        logging.info(f"Result of Simulation: {message}")
-                        if message['result'] is not None:
-                            self.portfolio_status = message
-
-                    elif message['id'] == 1006:
-                        logging.info(f"Position: {message}")
-                        if message['result'] is not None:
-                            self.portfolio_position = message["result"]
-
-                    elif message['id'] == 1001:
-                        logging.info(f"Result of executes: {message}")
-
-                elif 'method' in list(message):
-                    # Respond to Heartbeat Message
-                    if message['method'] == 'heartbeat':
-                        await self.heartbeat_response()
-
-                    elif message['method'] == 'subscription':
-                        logging.debug(f"Market Data Received: {message}")
-                        channel = message["params"]["channel"]
-
-                        for date in self.selected_expirations_raw:
-                            # Updating BTC price
-                            if channel == f"ticker.BTC-{date}.100ms":
-                                self.latest_underlying_prices[f"BTC-{date}"] = message["params"]["data"].get("mark_price", None)
-                                print("🔹 Updated BTC Future Price For {0}: {1}".format(date, self.latest_underlying_prices[f"BTC-{date}"]))
-
-                            if channel == "ticker.BTC-PERPETUAL.100ms":
-                                if date in self.perpetual_expirations_raw:
-                                    self.latest_underlying_prices[f"BTC-{date}"] = message["params"]["data"].get("mark_price", None)
-                                    print("🔹 Updated BTC Future Price For {0}: {1}".format(date,
-                                                                                           self.latest_underlying_prices[
-                                                                                               f"BTC-{date}"]))
-                            # Updating options for calculating spread
-                            if bool(re.match(fr"^ticker\.BTC-{date}-(\d+)-([CP])\.100ms", channel)):
-                                option_data = message["params"]["data"]
-                                logging.debug(option_data)
-
-                                timestamp = option_data.get('timestamp', None)
-                                instrument_name = option_data.get('instrument_name', None)
-                                bid_price = option_data.get('best_bid_price', None)
-                                ask_price = option_data.get('best_ask_price', None)
-                                bid_iv = option_data.get('bid_iv', None)
-                                ask_iv = option_data.get('ask_iv', None)
-                                delta = option_data['greeks'].get('delta', None)
-                                vega = option_data['greeks'].get('vega', None)
-                                theta = option_data['greeks'].get('theta', None)
-
-                                strike_price, option_type, expiration_timestamp, date_str = self.extract_strike_price_type_expiration(instrument_name)
-
-                                if strike_price is None or expiration_timestamp is None:
-                                    continue
-
-                                if option_type == "call" and strike_price < self.latest_underlying_prices[f"BTC-{date_str}"]:
-                                    continue
-                                if option_type == "put" and strike_price > self.latest_underlying_prices[f"BTC-{date_str}"]:
-                                    continue
-
-                                log_moneyness = np.log(strike_price / self.latest_underlying_prices[f"BTC-{date_str}"])
-
-                                # Storing through SQL
-                                sql = """INSERT INTO btc_options_raw (timestamp, instrument_name, expiration_timestamp, option_type,
-                                                                        bid_price, ask_price, bid_iv, ask_iv, 
-                                                                        underlying_price, strike_price, log_moneyness,
-                                                                        delta, vega, theta) 
-                                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
-                                values = (timestamp, instrument_name, expiration_timestamp, option_type,
-                                          bid_price, ask_price, bid_iv, ask_iv,
-                                          self.latest_underlying_prices[f"BTC-{date_str}"],
-                                          strike_price, log_moneyness,
-                                          delta, vega, theta)
-                                cursor.execute(sql, values)
-                                conn.commit()
-
-                                print("✅ Tick data inserted at {0} for {1}".format(datetime.now(),f"BTC-{date_str}"))
-
-                            # Updating options for generating IV curve
-                            if channel == 'markprice.options.btc_usd':
-                                curve_data = message["params"]["data"]
-
-                                for element in curve_data:
-                                    instrument_name = element.get('instrument_name', None)
-                                    timestamp = element.get('timestamp', None)
-                                    mark_price = element.get('mark_price', None)
-                                    mark_iv = element.get('iv', None)
-
-                                    if not instrument_name or not timestamp or not mark_price or not mark_iv:
-                                        continue
-                                    # Extract elements from instrument name
-                                    strike_price, option_type, expiration_timestamp, date_str = self.extract_strike_price_type_expiration(
-                                        instrument_name)
-
-                                    if strike_price is None or expiration_timestamp is None:
-                                        continue
-
-                                    # **Filter Only Selected Expiration Dates**
-                                    if expiration_timestamp not in self.selected_expirations:
-                                        continue
-
-                                    if self.latest_underlying_prices[f"BTC-{date_str}"] is None:
-                                        continue
-
-                                    if option_type == "call" and strike_price < self.latest_underlying_prices[
-                                        f"BTC-{date_str}"]:
-                                        continue
-                                    if option_type == "put" and strike_price > self.latest_underlying_prices[
-                                        f"BTC-{date_str}"]:
-                                        continue
-
-                                    log_moneyness = np.log(
-                                        strike_price / self.latest_underlying_prices[f"BTC-{date_str}"])
-
-                                    sql = """INSERT INTO btc_options_tick (timestamp, instrument_name, underlying_price, strike_price, 
-                                                                               mid_price, mark_iv, expiration_timestamp, option_type, log_moneyness) 
-                                                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"""
-                                    values = (
-                                    timestamp, instrument_name, self.latest_underlying_prices[f"BTC-{date_str}"],
-                                    strike_price,
-                                    mark_price, mark_iv, expiration_timestamp, option_type, log_moneyness)
-                                    cursor.execute(sql, values)
-                                    conn.commit()
-
-                                    print(
-                                        "✅ Curve data inserted at {0} for {1}".format(datetime.now(), f"BTC-{date_str}"))
-
-            else:
-                logging.info('WebSocket connection has broken.')
-                sys.exit(1)
+    def signature(self) -> None:
+        # Generate a timestamp
+        self.timestamp = round(datetime.now().timestamp() * 1000)
+        # Generate a **secure random nonce**
+        self.nonce = secrets.token_hex(16)  # 16-byte hex string
+        # Empty data field
+        self.data = ""
+        # Prepare the data to sign
+        data_to_sign = bytes('{}\n{}\n{}'.format(self.timestamp, self.nonce, self.data), "latin-1")
+        # Sign the data using the RSA private key with padding and hashing algorithm
+        signature = self.private_key.sign(
+            data_to_sign,
+            padding.PKCS1v15(),
+            hashes.SHA256()
+        )
+        self.encoded_signature = base64.urlsafe_b64encode(signature).decode('utf-8').rstrip('=')
 
     async def establish_heartbeat(self) -> None:
         """
@@ -467,24 +275,15 @@ class WebSocketClient:
         await self.websocket_client.send(json.dumps(msg))
         logging.info(f"Combo order sent: {msg}")
 
-    async def simulate_portfolio(self, simulated_positions: dict):
-        """
-        Simulate portfolio with hypothetical positions and return margin/liquidation estimates.
+    async def simulate_portfolio(self, simulated_positions: dict, add_positions: str="false"):
 
-        Args:
-            simulated_positions (dict): Dictionary like
-                {
-                    "BTC-PERPETUAL": 1000.0,
-                    "BTC-5JUL21-40000-C": 10.0
-                }
-        """
         msg = {
             "jsonrpc": "2.0",
             "id": 1005,
             "method": "private/simulate_portfolio",
             "params": {
                 "currency": "BTC",
-                "add_positions": True,
+                "add_positions": add_positions,
                 "simulated_positions": simulated_positions
             }
         }
@@ -493,14 +292,9 @@ class WebSocketClient:
         logging.info(f"🔍 Sent simulate_portfolio request with positions: {simulated_positions}")
 
     async def get_positions(self, kind: str = "option", currency: str = "BTC"):
-        """
-        Retrieve current open positions filtered by instrument kind.
 
-        Args:
-            kind (str): "future", "option", or leave as None to get all.
-        """
         params = {
-            "currency": "BTC"
+            "currency": currency
         }
         if kind:
             params["kind"] = kind
@@ -514,26 +308,92 @@ class WebSocketClient:
         await self.websocket_client.send(json.dumps(msg))
         logging.info(f"📦 get_positions request sent (kind={kind})")
 
+    async def get_account_summary(self, currency: str = "BTC"):
+
+        params = {"currency": currency}
+
+        msg = {
+            "jsonrpc": "2.0",
+            "id": 1007,
+            "method": "private/get_account_summary",
+            "params": params
+        }
+        await self.websocket_client.send(json.dumps(msg))
+        logging.info(f"📦 get_account_summary request sent")
+
+    async def close_position(self, instrument_name: str, type: str = "market", price: float = None):
+
+        msg = {
+            "jsonrpc": "2.0",
+            "id": 1008,
+            "method": "private/close_position",
+            "params": {
+                "instrument_name": instrument_name,
+                "type": type,
+                "price": price
+            }
+        }
+        await self.websocket_client.send(json.dumps(msg))
+        logging.info(f"close_position order sent: {msg}")
 class Strategy_RR(WebSocketClient):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, bot_token, chat_id, **kwargs):
         super().__init__(*args, **kwargs)
-        self.enabled = False
-        self.strike_prices: dict = {}
         self.spread_lower_bound = None
         self.spread_upper_bound = None
         self.latest_rr_spread = None
         self.latest_rr_spread_price = None
+        self.selected_expirations = None
+        self.portfolio_status = None
+        self.portfolio_position = None
+        self.enabled = False
         self.pre_margin_check_long = False
         self.pre_margin_check_short = False
+        self.strike_prices: dict = {}
+        self.latest_underlying_prices: dict = {}
+        self.otm_call: dict = {}
+        self.otm_put: dict = {}
+        self.expirations_pair: dict = {}
+        self.perpetual_expirations_raw: list = []
+        self.selected_expirations_raw: list = []
+        self.selected_expirations_subscribe: list = []
         self.spread_way = "SHORT"
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.loop = asyncio.new_event_loop()
+        self.start()
+
+    # Start the loop
+    def start(self):
+        print("Hi")
         self.get_user_expiration_dates()
         self.generate_subscribe()
+        self.signature()
         self.loop.create_task(self.update_subscribe())
         self.loop.create_task(self.compute_spd_skewness())
         self.loop.create_task(self.risk_manager())
         self.loop.create_task(self.should_execute())
-        self.loop.create_task(self.update_position())
+        self.loop.create_task(self.initialize_telegram_bot())
+        self.loop.run_until_complete(self.ws_manager())
 
+    # Extract elements from a title of instrument
+    def extract_strike_price_type_expiration(self, instr_name):
+        match = re.search(r'-(\d{2}[A-Z]{3}\d{2})-(\d+)-([CP])', instr_name)
+        if match:
+            date_str = match.group(1)
+            strike_price = float(match.group(2))
+            option_type = "call" if match.group(3) == "C" else "put"
+
+            try:
+                expiration_date = datetime.strptime(date_str, "%d%b%y")
+                expiration_timestamp = int(expiration_date.timestamp())
+            except ValueError:
+                expiration_timestamp = None
+
+            return strike_price, option_type, expiration_timestamp, date_str
+
+        return None, None, None, None
+
+    # Obtain user inputs
     def get_user_expiration_dates(self):
         user_input = input("Enter expiration dates (format: DDMMMYY, separated by commas): ").strip()
         user_input_2 = input("Please input any expiration dates using PERPETUAL price (format: DDMMMYY, separated by commas): ").strip()
@@ -568,16 +428,16 @@ class Strategy_RR(WebSocketClient):
         else:
             self.enabled = False
 
-    async def update_position(self):
-        await asyncio.sleep(10)
+    # Generate initial subscribe list consisting of futures and general options
+    def generate_subscribe(self):
+        for date in self.selected_expirations_raw:
+            self.selected_expirations_subscribe.append(f"ticker.BTC-{date}.100ms")
+            self.latest_underlying_prices[f"BTC-{date}"] = False
+        self.selected_expirations_subscribe.append("markprice.options.btc_usd")
+        self.selected_expirations_subscribe.append("ticker.BTC-PERPETUAL.100ms")
 
-        while True:
-            await self.get_positions()
-
-            await asyncio.sleep(60)  # Sleep to avoid tight loop
-
+    # Adopting strike prices whose log moneyness is closest to 0.1 and -0.1, respectively
     async def update_subscribe(self):
-        # Adopting strike prices whose log moneyness is closest to 0.1 and -0.1, respectively
         await asyncio.sleep(20)
 
         while True:
@@ -618,8 +478,8 @@ class Strategy_RR(WebSocketClient):
             print(f"Subscriptions are updated. {self.selected_expirations_subscribe}")
             await asyncio.sleep(600)
 
+    # Compute options' skewness; regarding ATM slope as skewness
     async def compute_spd_skewness(self):
-        # Regard ATM slope as skewness
         while True:
             await asyncio.sleep(60)
 
@@ -699,8 +559,8 @@ class Strategy_RR(WebSocketClient):
                     print(f"⚠️ Error processing expiration {formatted_date}: {e}")
                     continue
 
+    # Fetching target data from the past 12 hours
     def fetch_data(self):
-        # Fetching data from the past 12 hours
         sql = """
                 SELECT timestamp, expiration_timestamp, option_type, bid_price, ask_price, bid_iv, ask_iv, log_moneyness, delta, theta
                 FROM btc_options_raw
@@ -756,6 +616,7 @@ class Strategy_RR(WebSocketClient):
 
         return near_call_data, far_call_data, near_put_data, far_put_data
 
+    # Check the margin
     async def risk_manager(self):
         while True:
             await asyncio.sleep(60)
@@ -880,12 +741,15 @@ class Strategy_RR(WebSocketClient):
 
                 print(f"enabled? :{self.enabled}")
 
+                await self.get_positions()
+                await self.get_account_summary()
+
             except Exception as e:
                 print(f"⚠️ Error processing while simulation: {e}")
                 continue
 
+    # Detect signals for trades
     async def should_execute(self):
-
         while True:
             await asyncio.sleep(60)
             try:
@@ -899,6 +763,7 @@ class Strategy_RR(WebSocketClient):
                         logging.info(f"pre_margin_check_short = {self.pre_margin_check_short}")
 
                         if (self.spread_way == "SHORT") & (self.pre_margin_check_short == True):
+                            self.trade_time = datetime.now()
                             await self.place_order_sell(instrument_name ="BTC-{0}-{1}-C".format(
                                     self.expirations_pair[self.selected_expirations[1]],
                                     self.otm_call[
@@ -920,6 +785,7 @@ class Strategy_RR(WebSocketClient):
                             continue
 
                         if (self.spread_way == "LONG") & (self.pre_margin_check_long == True):
+                            self.trade_time = datetime.now()
                             await self.place_order_buy(instrument_name="BTC-{0}-{1}-C".format(
                                 self.expirations_pair[self.selected_expirations[1]],
                                 self.otm_call[
@@ -946,12 +812,236 @@ class Strategy_RR(WebSocketClient):
                 print(f"⚠️ Error processing while simulation: {e}")
                 continue
 
-class Telegram_bot(Strategy_RR):
-    def __init__(self, *args, bot_token, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.bot_token = bot_token
-        self.loop.create_task(self.initialize_telegram_bot())
-        self.start()
+    # Manage websocket; receiving data and save
+    async def ws_manager(self) -> None:
+        async with (websockets.connect(self.ws_connection_url, ping_interval=None, compression=None, close_timeout=60)
+                    as self.websocket_client):
+
+            # Authenticate WebSocket Connection
+            await self.ws_auth()
+
+            # Establish Heartbeat
+            await self.establish_heartbeat()
+
+            self.loop.create_task(self.ws_refresh_auth())
+
+            await self.ws_subscribe(operation='subscribe', ws_channel=self.selected_expirations_subscribe)
+
+            while self.websocket_client.state == websockets.protocol.State.OPEN:
+                message: bytes = await self.websocket_client.recv()
+                message: Dict = json.loads(message)
+
+                if 'id' in list(message):
+                    if message['id'] == 9929:
+                        if self.refresh_token is None:
+                            if message.get("result") is not None:
+                                logging.info('Successfully authenticated WebSocket Connection')
+                                logging.info(message)
+                            else:
+                                logging.info('Failed to authenticate WebSocket Connection')
+                                logging.info(message)
+                                sys.exit(1)
+                        else:
+                            logging.info('Successfully refreshed the authentication of the WebSocket Connection')
+                        self.access_token = message['result']['access_token']
+                        self.refresh_token = message['result']['refresh_token']
+
+                        # Refresh Authentication well before the required datetime
+                        if message['testnet']:
+                            expires_in: int = 300
+                        else:
+                            expires_in: int = message['result']['expires_in'] - 240
+
+                        self.refresh_token_expiry_time = datetime.now() + timedelta(seconds=expires_in)
+
+                    elif message['id'] == 8212:
+                        # Avoid logging Heartbeat messages
+                        continue
+
+                    elif message['id'] == 1005:
+                        logging.info(f"Result of Simulation: {message}")
+                        if message['result'] is not None:
+                            self.portfolio_status = message
+
+                    elif message['id'] == 1006:
+                        logging.info(f"Position: {message}")
+                        if message['result'] is not None:
+                            self.portfolio_position = message["result"]
+
+                    elif message['id'] == 1001:
+                        logging.info(f"Result of executes: {message}")
+                        if message['result']["order"]["label"] == f"{self.trade_time}":
+                            amount = 0
+                            weighted_price = 0
+                            profit_loss = 0
+                            contracts = 0
+                            fee = 0
+                            for i in range(len(message["result"]["trades"])):
+                                state = message["result"]["trades"][i]["state"]
+                                amount += message["result"]["trades"][i]["amount"]
+                                weighted_price += message["result"]["trades"][i]["price"] * \
+                                                  message["result"]["trades"][i]["amount"]
+                                direction = message["result"]["trades"][i]["direction"]
+                                instrument_name = message["result"]["trades"][i]["instrument_name"]
+                                profit_loss += message["result"]["trades"][i]["profit_loss"]
+                                contracts += message["result"]["trades"][i]["contracts"]
+                                fee += message["result"]["trades"][i]["fee"]
+
+                            average_price = weighted_price / amount
+
+                            await self.trade_alarm(
+                                f"{state}: {direction} {instrument_name} {contracts} at {self.trade_time}.\n"
+                                f" Average price:{average_price}\n"
+                                f" pnl:{profit_loss}")
+                            print("✅ Trades data inserted at {0} for {1}".format(datetime.now(), instrument_name))
+
+                    elif message['id'] == 1007:
+                        logging.info(f"Account summary: {message}")
+                        if message['result'] is not None:
+                            if message["result"]['margin_balance'] < message["result"]['maintenance_margin'] * 1.1:
+                                await self.close_position(instrument_name = "BTC-{0}-{1}-C".format(
+                                    self.expirations_pair[self.selected_expirations[1]],
+                                    self.otm_call[
+                                        f"BTC-{self.expirations_pair[self.selected_expirations[1]]}"][0]))
+                                await self.close_position(instrument_name="BTC-{0}-{1}-C".format(
+                                    self.expirations_pair[self.selected_expirations[1]],
+                                    self.otm_put[
+                                        f"BTC-{self.expirations_pair[self.selected_expirations[1]]}"][0]))
+                                await self.close_position(instrument_name="BTC-{0}-{1}-C".format(
+                                    self.expirations_pair[self.selected_expirations[0]],
+                                    self.otm_call[
+                                        f"BTC-{self.expirations_pair[self.selected_expirations[0]]}"][0]))
+                                await self.close_position(instrument_name="BTC-{0}-{1}-C".format(
+                                    self.expirations_pair[self.selected_expirations[0]],
+                                    self.otm_put[
+                                        f"BTC-{self.expirations_pair[self.selected_expirations[0]]}"][0]))
+
+                                print("Trades are closed.")
+
+                elif 'method' in list(message):
+                    # Respond to Heartbeat Message
+                    if message['method'] == 'heartbeat':
+                        await self.heartbeat_response()
+
+                    elif message['method'] == 'subscription':
+                        logging.debug(f"Market Data Received: {message}")
+                        channel = message["params"]["channel"]
+
+                        for date in self.selected_expirations_raw:
+                            # Updating BTC price
+                            if channel == f"ticker.BTC-{date}.100ms":
+                                self.latest_underlying_prices[f"BTC-{date}"] = message["params"]["data"].get(
+                                    "mark_price", None)
+                                print("🔹 Updated BTC Future Price For {0}: {1}".format(date,
+                                                                                       self.latest_underlying_prices[
+                                                                                           f"BTC-{date}"]))
+
+                            if channel == "ticker.BTC-PERPETUAL.100ms":
+                                if date in self.perpetual_expirations_raw:
+                                    self.latest_underlying_prices[f"BTC-{date}"] = message["params"]["data"].get(
+                                        "mark_price", None)
+                                    print("🔹 Updated BTC Future Price For {0}: {1}".format(date,
+                                                                                           self.latest_underlying_prices[
+                                                                                               f"BTC-{date}"]))
+                            # Updating options for calculating spread
+                            if bool(re.match(fr"^ticker\.BTC-{date}-(\d+)-([CP])\.100ms", channel)):
+                                option_data = message["params"]["data"]
+                                logging.debug(option_data)
+
+                                timestamp = option_data.get('timestamp', None)
+                                instrument_name = option_data.get('instrument_name', None)
+                                bid_price = option_data.get('best_bid_price', None)
+                                ask_price = option_data.get('best_ask_price', None)
+                                bid_iv = option_data.get('bid_iv', None)
+                                ask_iv = option_data.get('ask_iv', None)
+                                delta = option_data['greeks'].get('delta', None)
+                                vega = option_data['greeks'].get('vega', None)
+                                theta = option_data['greeks'].get('theta', None)
+
+                                strike_price, option_type, expiration_timestamp, date_str = self.extract_strike_price_type_expiration(
+                                    instrument_name)
+
+                                if strike_price is None or expiration_timestamp is None:
+                                    continue
+
+                                if option_type == "call" and strike_price < self.latest_underlying_prices[
+                                    f"BTC-{date_str}"]:
+                                    continue
+                                if option_type == "put" and strike_price > self.latest_underlying_prices[
+                                    f"BTC-{date_str}"]:
+                                    continue
+
+                                log_moneyness = np.log(strike_price / self.latest_underlying_prices[f"BTC-{date_str}"])
+
+                                # Storing through SQL
+                                sql = """INSERT INTO btc_options_raw (timestamp, instrument_name, expiration_timestamp, option_type,
+                                                                         bid_price, ask_price, bid_iv, ask_iv, 
+                                                                         underlying_price, strike_price, log_moneyness,
+                                                                         delta, vega, theta) 
+                                              VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
+                                values = (timestamp, instrument_name, expiration_timestamp, option_type,
+                                          bid_price, ask_price, bid_iv, ask_iv,
+                                          self.latest_underlying_prices[f"BTC-{date_str}"],
+                                          strike_price, log_moneyness,
+                                          delta, vega, theta)
+                                cursor.execute(sql, values)
+                                conn.commit()
+
+                                print("✅ Tick data inserted at {0} for {1}".format(datetime.now(), f"BTC-{date_str}"))
+
+                            # Updating options for generating IV curve
+                            if channel == 'markprice.options.btc_usd':
+                                curve_data = message["params"]["data"]
+
+                                for element in curve_data:
+                                    instrument_name = element.get('instrument_name', None)
+                                    timestamp = element.get('timestamp', None)
+                                    mark_price = element.get('mark_price', None)
+                                    mark_iv = element.get('iv', None)
+
+                                    if not instrument_name or not timestamp or not mark_price or not mark_iv:
+                                        continue
+                                    # Extract elements from instrument name
+                                    strike_price, option_type, expiration_timestamp, date_str = self.extract_strike_price_type_expiration(
+                                        instrument_name)
+
+                                    if strike_price is None or expiration_timestamp is None:
+                                        continue
+
+                                    # **Filter Only Selected Expiration Dates**
+                                    if expiration_timestamp not in self.selected_expirations:
+                                        continue
+
+                                    if self.latest_underlying_prices[f"BTC-{date_str}"] is None:
+                                        continue
+
+                                    if option_type == "call" and strike_price < self.latest_underlying_prices[
+                                        f"BTC-{date_str}"]:
+                                        continue
+                                    if option_type == "put" and strike_price > self.latest_underlying_prices[
+                                        f"BTC-{date_str}"]:
+                                        continue
+
+                                    log_moneyness = np.log(
+                                        strike_price / self.latest_underlying_prices[f"BTC-{date_str}"])
+
+                                    sql = """INSERT INTO btc_options_tick (timestamp, instrument_name, underlying_price, strike_price, 
+                                                                                mid_price, mark_iv, expiration_timestamp, option_type, log_moneyness) 
+                                                  VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"""
+                                    values = (
+                                        timestamp, instrument_name, self.latest_underlying_prices[f"BTC-{date_str}"],
+                                        strike_price,
+                                        mark_price, mark_iv, expiration_timestamp, option_type, log_moneyness)
+                                    cursor.execute(sql, values)
+                                    conn.commit()
+
+                                    print(
+                                        "✅ Curve data inserted at {0} for {1}".format(datetime.now(),
+                                                                                      f"BTC-{date_str}"))
+
+            else:
+                logging.info('WebSocket connection has broken.')
+                sys.exit(1)
 
     # **1. Start Command**
     async def telegram_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1006,7 +1096,7 @@ class Telegram_bot(Strategy_RR):
         except Exception as e:
             await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
-    # **4. Check Margin & P&L**
+    #**4. Check Margin & P&L**
     async def margin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             margin_data = self.portfolio_status['result']
@@ -1022,6 +1112,7 @@ class Telegram_bot(Strategy_RR):
         except Exception as e:
             await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
+
     # **5. Toggle Risk Reversal Trading**
     async def toggle_risk_reversal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         args = context.args
@@ -1033,9 +1124,17 @@ class Telegram_bot(Strategy_RR):
         print(f"enabled? : {self.enabled}")
         await update.message.reply_text(f"⚙️ Risk Reversal is now {'ENABLED' if enabled else 'DISABLED'}.")
 
+    async def trade_alarm(self, message: str) -> None:
+        try:
+            await self.bot.send_message(self.chat_id, text=message)
+        except Exception as e:
+            print(e)
+
     async def initialize_telegram_bot(self):
         # build the application
+        self.bot = telegram.Bot(token=self.bot_token)
         app = ApplicationBuilder().token(self.bot_token).build()
+        print("OK?")
 
         app.add_handler(CommandHandler("start", self.telegram_start))
         app.add_handler(CommandHandler("trade", self.trade))
@@ -1067,33 +1166,24 @@ if __name__ == "__main__":
     )
     cursor = conn.cursor()
 
-    with open('key/client_key.txt', 'r') as f:
+    # Load the client ID and private key from the PEM file
+    with open('key/client_id.txt', 'r') as f:
         client_id = f.readline().strip()
 
-    # Load the private key from the PEM file
     with open('key/private.pem', 'rb') as private_pem:
         private_key = serialization.load_pem_private_key(private_pem.read(), password=None)
-    # Generate a timestamp
-    timestamp = round(datetime.now().timestamp() * 1000)
-    # Generate a **secure random nonce**
-    nonce = secrets.token_hex(16)  # 16-byte hex string
-    # Empty data field
-    data = ""
-    # Prepare the data to sign
-    data_to_sign = bytes('{}\n{}\n{}'.format(timestamp, nonce, data), "latin-1")
-    # Sign the data using the RSA private key with padding and hashing algorithm
-    signature = private_key.sign(
-        data_to_sign,
-        padding.PKCS1v15(),
-        hashes.SHA256()
-    )
-    # Encode the signature to base64
+
     ws_url = "wss://www.deribit.com/ws/api/v2"
-    encoded_signature = base64.urlsafe_b64encode(signature).decode('utf-8').rstrip('=')
 
     # Telegram bot token
     with open('key/bot_token.txt', 'r') as f:
         bot_token = f.readline().strip()
 
+    with open('key/chat_id.txt', 'r') as f:
+        try:
+            chat_id = int(f.readline().strip())
+        except ValueError:
+            raise ValueError("chat_id.txt must contain a valid integer.")
+
     # Initialization
-    test = Telegram_bot(ws_url, client_id, timestamp, encoded_signature, nonce, data, bot_token=bot_token)
+    test = Strategy_RR(ws_url, client_id, private_key, bot_token=bot_token, chat_id = chat_id)
