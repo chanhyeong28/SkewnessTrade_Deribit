@@ -21,7 +21,7 @@ At its core, this project implements **Risk Reversal trades** as a proxy for ske
 
 ## Strategy details
 - **Risk Reversal as skew proxy**  
-  The strategy uses a **Risk Reversal (RR)** construct (e.g., long call vs short put of similar absolute delta, commonly 25-delta) as a practical proxy for skewness.  
+  The strategy uses a **Risk Reversal (RR)** construct (e.g., long OTM call vs short OTM put of similar absolute gamma or vega) as a practical proxy for skewness strategy.  
   RR captures the relative pricing of upside vs downside volatility.  
 
 - **How skewness is measured**  
