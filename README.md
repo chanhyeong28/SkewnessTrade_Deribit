@@ -73,6 +73,8 @@ sqlite3 strategy.db < create_tables.sql
 - `key/chat_id.txt`: Telegram chat id (one line, optional)
 - Utilities in `key/generate_key.py` and `key/read_key.py` are available if you prefer scripted handling.
 
+---
+
 ### Running the strategy
 Start the realtime strategy runner:
 ```bash
@@ -102,6 +104,8 @@ Please input way. SHORT? LONG?: SHORT
 Execute enabled?: False
 ```
 
+---
+
 ### Visualization & analysis scripts
 - **draw_graph_iv.py**: Plot historical implied volatility and the spread between selected expirations.
   ```bash
@@ -127,21 +131,29 @@ Notes:
 - These scripts may read from the same database populated by the live runner.
 - If scripts prompt for dates, use `DDMMMYY` format, identical to the strategy runner.
 
+---
+
 ### Monitoring (Telegram)
 - If Telegram credentials are provided, the algorithm can push runtime alerts and trade notifications.
 - Place tokens in `key/bot_token.txt` and chat id in `key/chat_id.txt`.
 - Example alert screenshots are referenced in the Illustrations section below.
+
+---
 
 ### Best practices
 - Start with `Execute enabled? = False` to confirm signals and data flow.
 - Verify your date inputs use the exact `DDMMMYY` format and uppercase month.
 - Define PERPETUAL-based expirations only if you intend to proxy them with the perpetual price.
 
+---
+
 ### Troubleshooting
 - If imports fail, re-activate your venv and re-run `pip install -r requirements.txt`.
 - If charts are empty, ensure `create_tables.sql` was executed and the live runner has written data.
 - If prompts are rejected, re-check the `DDMMMYY` format and comma separation.
 - For API/notification issues, verify entries under `key/` files.
+
+---
 
 ### Quick start checklist
 - Installed dependencies from `requirements.txt`
@@ -150,9 +162,16 @@ Notes:
 - Ran `python websocket_client.py` and provided required inputs
 - Used plotting scripts to inspect historical spreads, skew, and SPD
 
+---
+
 ### Illustrations
-- `pictures/implied_curve_example`: Example volatility curve and SPD visualization captured from `get_spd_pdf_log.py`.
-- `pictures/bot_1.png`, `pictures/bot_2.png`: Example Telegram alerts produced by the live runner.
+
+![Implied curve and SPD](pictures/implied_curve_example.png)
+
+![Telegram alert #1](pictures/bot_1.png)
+![Telegram alert #2](pictures/bot_2.png)
+
+---
 
 ### Disclaimer
-This software is provided for educational purposes only. Markets involve risk. Use `Execute enabled? = False` until you have fully verified the system and understand the risks of live trading.
+Markets involve risk. Use `Execute enabled? = False` until you have fully verified the system and understand the risks of live trading.
