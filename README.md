@@ -1,27 +1,56 @@
-### SkewnessTrade_Deribit
+# SkewnessTrade_Deribit
 
-Systematic options skew strategy on Deribit using two different expirations. The program connects via websocket, monitors signals derived from skew between expirations, and can execute trades when enabled. Utilities are provided to visualize history (price/IV spreads), skewness (vol-slope), volatility curves, and state price densities.
+Systematic **options skew strategy** on Deribit using two different expirations.  
+The program connects via WebSocket, monitors signals derived from skew between expirations, and can execute trades when enabled.  
+Utilities are provided to visualize history (price/IV spreads), skewness (vol-slope), volatility curves, and state price densities.  
 
-### Features
-- **Two-expiration skew strategy**: Select two or more expirations; strategy evaluates skew and generates signals.
-- **Trade execution toggle**: Dry-run by default; enable execution when ready.
-- **Historical charts**: Price- and IV-based spread charts.
-- **Skewness view**: Slope of volatility curve by expiration.
-- **Vol curves & SPD**: Visualize volatility curves and state price densities.
+At its core, this project implements **Risk Reversal trades** as a proxy for skewness trading.  
 
-### Strategy details
-- **Risk Reversal as skew proxy**: The strategy uses a Risk Reversal (RR) construct (e.g., long call vs short put of similar absolute delta, commonly 25-delta) as a practical proxy for skewness. RR captures the relative pricing of upside vs downside volatility.
-- **Measuring skewness**: Skewness is proxied by the slope of the implied volatility curve at-the-money (ATM). A steeper positive slope indicates stronger positive skew; a negative slope indicates put-skew dominance.
-- **BTC-specific behavior**: BTC tends to exhibit positive skewness, unlike many equities with negative put skew. The longer the time to expiration, the higher the skewness tends to be in BTC.
-- **Construction across expirations**: By taking RRs in opposite directions across two different expirations simultaneously, the position reduces net delta exposure (RR already hedges much of gamma and vega by construction). If you have a view on near-term options, you can time entries using the nearest expiration while pairing with a longer one.
-- **Execution rule in this code**: The strategy triggers when the instantaneous execution cost is negative in both USD terms and implied volatility terms—i.e., expected immediate return is positive on entry.
+---
 
-### Requirements
-- **Python**: 3.9+ recommended
-- **Packages**: install from `requirements.txt`
-- **Database**: create tables via `create_tables.sql`
-- **Deribit account**: API access credentials
-- (Optional) **Telegram**: for notifications via `key/bot_token.txt` and `key/chat_id.txt`
+## Features
+- **Two-expiration skew strategy**: Select two or more expirations; strategy evaluates skew and generates signals.  
+- **Risk Reversal as skew proxy**: RR captures relative pricing of upside vs downside volatility.  
+- **Trade execution toggle**: Dry-run by default; enable execution when ready.  
+- **Historical charts**: Price- and IV-based spread charts.  
+- **Skewness view**: Slope of volatility curve by expiration (ATM slope proxy).  
+- **Vol curves & SPD**: Visualize volatility curves and state price densities.  
+- **Telegram monitoring**: Get runtime alerts and trade notifications.  
+
+---
+
+## Strategy details
+- **Risk Reversal as skew proxy**  
+  The strategy uses a **Risk Reversal (RR)** construct (e.g., long call vs short put of similar absolute delta, commonly 25-delta) as a practical proxy for skewness.  
+  RR captures the relative pricing of upside vs downside volatility.  
+
+- **How skewness is measured**  
+  Skewness is proxied by the **slope of the implied volatility curve at-the-money (ATM)**.  
+  A steeper positive slope indicates stronger positive skew; a negative slope indicates put-skew dominance.  
+
+- **BTC-specific behavior**  
+  BTC tends to exhibit **positive skewness**, unlike many equities that often display negative put skew.  
+  In general, the **longer the time to expiration, the stronger the skewness** observed in BTC.  
+
+- **Construction across expirations**  
+  By taking **Risk Reversals in opposite directions** across two different expirations simultaneously, the position reduces net delta exposure.  
+  (A Risk Reversal by construction already hedges much of **gamma** and **vega** exposure.)  
+  If you have a view on near-term options, you can time entries using the nearest expiration while pairing with a longer one.  
+
+- **Execution rule in this code**  
+  The strategy executes **only when the instantaneous cost of entry is negative** in both USD and implied volatility terms.  
+  In other words, trades are entered only when the expected immediate return is positive.  
+
+---
+
+## Requirements
+- **Python**: 3.9+ recommended  
+- **Packages**: install from `requirements.txt`  
+- **Database**: create tables via `create_tables.sql`  
+- **Deribit account**: API access credentials  
+- (Optional) **Telegram**: for notifications via `key/bot_token.txt` and `key/chat_id.txt`  
+
+---
 
 ### Setup
 1) Create a virtual environment and install dependencies
